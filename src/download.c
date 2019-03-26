@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <curl/curl.h>
+#include <stdio.h>
 
 #include "download.h"
 #include "common.h"
@@ -94,7 +95,7 @@ static int download_progress(void *clientp, double dltotal, double dlnow, double
 
 	if (p < 100.0f) {
 		if ((int)p > lastprogress) {
-			info("downloading: %d%%\n", (int)p);
+			printf("downloading: %d%%\n", (int)p);
 			lastprogress = (int)p;
 		}
 	}
