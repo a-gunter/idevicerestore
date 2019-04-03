@@ -96,6 +96,7 @@ static int download_progress(void *clientp, double dltotal, double dlnow, double
 	if (p < 100.0f) {
 		if ((int)p > lastprogress) {
 			printf("downloading: %d%%\n", (int)p);
+			fflush(stdout);
 			lastprogress = (int)p;
 		}
 	}
