@@ -503,9 +503,19 @@ int ipsw_get_signed_firmwares(const char* product, plist_t* firmwares)
 	dict = json_to_plist(jdata);
 	free(jdata);
 	if (!dict || plist_get_node_type(dict) != PLIST_DICT) {
-		error("ERROR: Failed to parse json data.\n");
-		plist_free(dict);
-		return -1;
+		// try v2
+		snprintf(url, sizeof(url), "https://api.ipsw.me/v2/device/%s", product);
+		if (download_to_buffer(url, &jdata, &jsize) < 0) {
+			error("ERROR: Download from %s failed.\n", url);
+			return -1;
+		}
+		dict = json_to_plist(jdata);
+		free(jdata);
+		if (!dict || plist_get_node_type(dict) != PLIST_DICT) {
+			error("ERROR: Failed to parse json data.\n");
+			plist_free(dict);
+			return -1;			
+		}
 	}
 
 	node = plist_dict_get_item(dict, product);
