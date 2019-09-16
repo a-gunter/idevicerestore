@@ -39,7 +39,7 @@
 #define ASR_BUFFER_SIZE 65536
 #define ASR_FEC_SLICE_STRIDE 40
 #define ASR_PACKETS_PER_FEC 25
-#define ASR_PAYLOAD_PACKET_SIZE 1450
+#define ASR_PAYLOAD_PACKET_SIZE 131072
 #define ASR_CHECKSUM_CHUNK_SIZE 131072
 
 int asr_open_with_timeout(idevice_t device, asr_client_t* asr) {
@@ -223,7 +223,7 @@ int asr_perform_validation(asr_client_t asr, const char* filesystem) {
 		plist_dict_set_item(packet_info, "Checksum Chunk Size", plist_new_uint(ASR_CHECKSUM_CHUNK_SIZE));
 	}
 	plist_dict_set_item(packet_info, "FEC Slice Stride", plist_new_uint(ASR_FEC_SLICE_STRIDE));
-	plist_dict_set_item(packet_info, "Packet Payload Size", plist_new_uint(ASR_PAYLOAD_PACKET_SIZE));
+	plist_dict_set_item(packet_info, "Packet Payload Size", plist_new_uint(1450));
 	plist_dict_set_item(packet_info, "Packets Per FEC", plist_new_uint(ASR_PACKETS_PER_FEC));
 	plist_dict_set_item(packet_info, "Payload", payload_info);
 	plist_dict_set_item(packet_info, "Stream ID", plist_new_uint(ASR_STREAM_ID));
