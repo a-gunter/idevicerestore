@@ -145,7 +145,7 @@ int tss_parameters_add_from_manifest(plist_t parameters, plist_t build_identity)
 		sscanf(bb_chip_id_string, "%x", &bb_chip_id);
 		plist_dict_set_item(parameters, "BbChipID", plist_new_uint(bb_chip_id));
 	} else {
-		error("WARNING: Unable to find BbChipID node\n");
+		debug("NOTE: Unable to find BbChipID node\n");
 	}
 	node = NULL;
 
@@ -198,7 +198,7 @@ int tss_parameters_add_from_manifest(plist_t parameters, plist_t build_identity)
 	if (node && plist_get_node_type(node) == PLIST_DATA) {
 		plist_dict_set_item(parameters, "BbSkeyId", plist_copy(node));
 	} else {
-		error("WARNING: Unable to find BbSkeyId node\n");
+		debug("NOTE: Unable to find BbSkeyId node\n");
 	}
 	node = NULL;
 
@@ -422,11 +422,9 @@ int tss_request_add_common_tags(plist_t request, plist_t parameters, plist_t ove
 
 	/* ApECID */
 	node = plist_dict_get_item(parameters, "ApECID");
-	if (!node || plist_get_node_type(node) != PLIST_UINT) {
-		error("ERROR: Unable to find required ApECID in parameters\n");
-		return -1;
+	if (node) {
+		plist_dict_set_item(request, "ApECID", plist_copy(node));
 	}
-	plist_dict_set_item(request, "ApECID", plist_copy(node));
 	node = NULL;
 
 	/* UniqueBuildID */
@@ -527,15 +525,15 @@ static void tss_entry_apply_restore_request_rules(plist_t tss_entry, plist_t par
 			plist_dict_next_item(actions, iter, &key, &value);
 			if (key == NULL)
 				break;
-			uint8_t bv = 0;
+			uint8_t bv = 255;
 			plist_get_bool_val(value, &bv);
-			if (bv) {
+			if (bv != 255) {
 				value2 = plist_dict_get_item(tss_entry, key);
 				if (value2) {
 					plist_dict_remove_item(tss_entry, key);
 				}
-				debug("DEBUG: Adding action %s to TSS entry\n", key);
-				plist_dict_set_item(tss_entry, key, plist_new_bool(1));
+				debug("DEBUG: Adding %s=%s to TSS entry\n", key, (bv) ? "true" : "false");
+				plist_dict_set_item(tss_entry, key, plist_new_bool(bv));
 			}
 			free(key);
 		}
@@ -574,6 +572,14 @@ int tss_request_add_ap_tags(plist_t request, plist_t parameters, plist_t overrid
 		if (strcmp(key, "Diags") == 0) {
 			free(key);
 			continue;
+		}
+
+		if (_plist_dict_get_bool(parameters, "_OnlyFWComponents")) {
+			plist_t info_dict = plist_dict_get_item(manifest_entry, "Info");
+			if (!_plist_dict_get_bool(manifest_entry, "Trusted") && !_plist_dict_get_bool(info_dict, "IsFirmwarePayload") && !_plist_dict_get_bool(info_dict, "IsSecondaryFirmwarePayload") && !_plist_dict_get_bool(info_dict, "IsFUDFirmware")) {
+				debug("DEBUG: %s: Skipping '%s' as it is neither firmware nor secondary firmware payload\n", __func__, key);
+				continue;
+			}
 		}
 
 		/* copy this entry */
@@ -1182,6 +1188,7 @@ plist_t tss_request_send(plist_t tss_request, const char* server_url_string) {
 			// no status code in response. retry
 			free(response->content);
 			free(response);
+			response = NULL;
 			sleep(2);
 			continue;
 		} else if (status_code == 8) {
@@ -1205,15 +1212,15 @@ plist_t tss_request_send(plist_t tss_request, const char* server_url_string) {
 	}
 
 	if (status_code != 0) {
-		if (strstr(response->content, "MESSAGE=") != NULL) {
+		if (response && strstr(response->content, "MESSAGE=") != NULL) {
 			char* message = strstr(response->content, "MESSAGE=") + strlen("MESSAGE=");
 			error("ERROR: TSS request failed (status=%d, message=%s)\n", status_code, message);
 		} else {
 			error("ERROR: TSS request failed: %s (status=%d)\n", curl_error_message, status_code);
 		}
 		free(request);
-		free(response->content);
-		free(response);
+		if (response) free(response->content);
+		if (response) free(response);
 		return NULL;
 	}
 

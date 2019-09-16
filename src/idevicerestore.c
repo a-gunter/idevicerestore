@@ -100,6 +100,8 @@ static void usage(int argc, char* argv[], int err)
 	" -e, --erase      Perform a full restore, erasing all data (defaults to update)\n" \
 	"                  DO NOT USE if you want to preserve user data on the device!\n" \
 	" -y, --no-input   Non-interactive mode, do not ask for any input.\n" \
+	"                  WARNING: This will disable certain checks/prompts that are\n" \
+	"                  supposed to prevent DATA LOSS. Use with caution.\n" \
 	" -n, --no-action  Do not perform any restore action. If combined with -l option\n" \
 	"                  the on-demand ipsw download is performed before exiting.\n" \
 	" -h, --help       Prints this usage information\n" \
@@ -185,6 +187,20 @@ static int load_version_data(struct idevicerestore_client_t* client)
 	}
 
 	return 0;
+}
+
+static int32_t get_version_num(const char *s_ver)
+{
+        int vers[3] = {0, 0, 0};
+        if (sscanf(s_ver, "%d.%d.%d", &vers[0], &vers[1], &vers[2]) >= 2) {
+                return ((vers[0] & 0xFF) << 16) | ((vers[1] & 0xFF) << 8) | (vers[2] & 0xFF);
+        }
+        return 0x00FFFFFF;
+}
+
+static int compare_versions(const char *s_ver1, const char *s_ver2)
+{
+	return (get_version_num(s_ver1) & 0xFFFF00) - (get_version_num(s_ver2) & 0xFFFF00);
 }
 
 int idevicerestore_start(struct idevicerestore_client_t* client)
@@ -672,6 +688,47 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	/* print information about current build identity */
 	build_identity_print_information(build_identity);
 
+	if (client->mode->index == MODE_NORMAL && !(client->flags & FLAG_ERASE) && !(client->flags & FLAG_SHSHONLY)) {
+		plist_t pver = normal_get_lockdown_value(client, NULL, "ProductVersion");
+		char *device_version = NULL;
+		if (pver) {
+			plist_get_string_val(pver, &device_version);
+			plist_free(pver);
+		}
+		if (device_version && (compare_versions(device_version, client->version) > 0)) {
+			if (client->flags & FLAG_INTERACTIVE) {
+				char input[64];
+				char spaces[16];
+				int num_spaces = 13 - strlen(client->version) - strlen(device_version);
+				memset(spaces, ' ', num_spaces);
+				spaces[num_spaces] = '\0';
+				printf("################################ [ WARNING ] #################################\n"
+				       "# You are trying to DOWNGRADE a %s device with an IPSW for %s while%s #\n"
+				       "# trying to preserve the user data (Upgrade restore). This *might* work, but #\n"
+				       "# there is a VERY HIGH chance it might FAIL BADLY with COMPLETE DATA LOSS.   #\n"
+				       "# Hit CTRL+C now if you want to abort the restore.                           #\n"
+				       "# If you want to take the risk (and have a backup of your important data!)   #\n"
+				       "# type YES and press ENTER to continue. You have been warned.                #\n"
+				       "##############################################################################\n",
+				       device_version, client->version, spaces);
+				while (1) {
+					printf("> ");
+					fflush(stdout);
+					fflush(stdin);
+					input[0] = '\0';
+					get_user_input(input, 63, 0);
+					if (*input != '\0' && !strcmp(input, "YES")) {
+						break;
+					} else {
+						printf("Invalid input. Please type YES or hit CTRL+C to abort.\n");
+						continue;
+					}
+				}
+			}
+		}
+		free(device_version);
+	}
+
 	if (client->flags & FLAG_ERASE && client->flags & FLAG_INTERACTIVE) {
 		char input[64];
 		printf("################################ [ WARNING ] #################################\n"
@@ -813,6 +870,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 
 	/* retrieve shsh blobs if required */
 	if (tss_enabled) {
+		int stashbag_commit_required = 0;
 		debug("Getting device's ECID for TSS request\n");
 		/* fetch the device's ECID for the TSS request */
 		if (get_ecid(client, &client->ecid) < 0) {
@@ -820,6 +878,35 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			return -1;
 		}
 		info("Found ECID " FMT_qu "\n", (long long unsigned int)client->ecid);
+
+		if (client->mode->index == MODE_NORMAL && !(client->flags & FLAG_ERASE) && !(client->flags & FLAG_SHSHONLY)) {
+			plist_t node = normal_get_lockdown_value(client, NULL, "HasSiDP");
+			uint8_t needs_preboard = 0;
+			if (node && plist_get_node_type(node) == PLIST_BOOLEAN) {
+				plist_get_bool_val(node, &needs_preboard);
+			}
+			if (needs_preboard) {
+				info("Checking if device requires stashbag...\n");
+				plist_t manifest;
+				if (get_preboard_manifest(client, build_identity, &manifest) < 0) {
+					error("ERROR: Unable to create preboard manifest.\n");
+					return -1;
+				}
+				debug("DEBUG: creating stashbag...\n");
+				int err = normal_handle_create_stashbag(client, manifest);
+				if (err < 0) {
+					if (err == -2) {
+						error("ERROR: Could not create stashbag (timeout).\n");
+					} else {
+						error("ERROR: An error occurred while creating the stashbag.\n");
+					}
+					return -1;
+				} else if (err == 1) {
+					stashbag_commit_required = 1;
+				}
+				plist_free(manifest);
+			}
+		}
 
 		if (client->build_major > 8) {
 			unsigned char* nonce = NULL;
@@ -843,6 +930,19 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		if (get_tss_response(client, build_identity, &client->tss) < 0) {
 			error("ERROR: Unable to get SHSH blobs for this device\n");
 			return -1;
+		}
+		if (stashbag_commit_required) {
+			plist_t ticket = plist_dict_get_item(client->tss, "ApImg4Ticket");
+			if (!ticket || plist_get_node_type(ticket) != PLIST_DATA) {
+				error("ERROR: Missing ApImg4Ticket in TSS response for stashbag commit\n");
+				return -1;
+			}
+			info("Committing stashbag...\n");
+			int err = normal_handle_commit_stashbag(client, ticket);
+			if (err < 0) {
+				error("ERROR: Could not commit stashbag (%d). Aborting.\n", err);
+				return -1;
+			}
 		}
 	}
 
@@ -1599,6 +1699,66 @@ plist_t build_manifest_get_build_identity_for_model_with_restore_behavior(plist_
 plist_t build_manifest_get_build_identity_for_model(plist_t build_manifest, const char *hardware_model)
 {
 	return build_manifest_get_build_identity_for_model_with_restore_behavior(build_manifest, hardware_model, NULL);
+}
+
+int get_preboard_manifest(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* manifest)
+{
+	plist_t request = NULL;
+	*manifest = NULL;
+
+	if (!client->image4supported) {
+		return -1;
+	}
+
+	/* populate parameters */
+	plist_t parameters = plist_new_dict();
+
+	plist_t overrides = plist_new_dict();
+	plist_dict_set_item(overrides, "@APTicket", plist_new_bool(1));
+	plist_dict_set_item(overrides, "ApProductionMode", plist_new_uint(0));
+	plist_dict_set_item(overrides, "ApSecurityDomain", plist_new_uint(0));
+
+	plist_dict_set_item(parameters, "ApProductionMode", plist_new_bool(0));
+	plist_dict_set_item(parameters, "ApSecurityMode", plist_new_bool(0));
+
+	tss_parameters_add_from_manifest(parameters, build_identity);
+
+	/* create basic request */
+	request = tss_request_new(NULL);
+	if (request == NULL) {
+		error("ERROR: Unable to create TSS request\n");
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add common tags from manifest */
+	if (tss_request_add_common_tags(request, parameters, overrides) < 0) {
+		error("ERROR: Unable to add common tags\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	plist_dict_set_item(parameters, "_OnlyFWComponents", plist_new_bool(1));
+
+	/* add tags from manifest */
+	if (tss_request_add_ap_tags(request, parameters, NULL) < 0) {
+		error("ERROR: Unable to add ap tags\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	plist_t local_manifest = NULL;
+	int res = img4_create_local_manifest(request, &local_manifest);
+
+	*manifest = local_manifest;
+
+	plist_free(request);
+	plist_free(parameters);
+	plist_free(overrides);
+
+	return res;
 }
 
 int get_tss_response(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* tss) {
