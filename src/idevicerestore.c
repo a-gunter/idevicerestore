@@ -1109,8 +1109,8 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		return -1;
 	}
 
-	// if the device is in DFU mode, place device into recovery mode
 	if (client->mode->index == MODE_DFU) {
+		// if the device is in DFU mode, place it into recovery mode
 		dfu_client_free(client);
 		recovery_client_free(client);
 		if ((client->flags & FLAG_CUSTOM) && limera1n_is_supported(client->device)) {
@@ -1133,7 +1133,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			info("exploited\n");
 		}
 		if (dfu_enter_recovery(client, build_identity) < 0) {
-			error("ERROR: Unable to place device into recovery mode from %s mode\n", client->mode->string);
+			error("ERROR: Unable to place device into recovery mode from DFU mode\n");
 			plist_free(buildmanifest);
 			if (client->tss)
 				plist_free(client->tss);
@@ -1141,11 +1141,8 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 				unlink(filesystem);
 			return -2;
 		}
-	}
-
-	if (client->mode->index == MODE_DFU) {
-		client->mode = &idevicerestore_modes[MODE_RECOVERY];
-	} else {
+	} else if (client->mode->index == MODE_RECOVERY) {
+		// device is in recovery mode
 		if ((client->build_major > 8) && !(client->flags & FLAG_CUSTOM)) {
 			if (!client->image4supported) {
 				/* send ApTicket */
@@ -1163,10 +1160,27 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			return -2;
 		}
 		recovery_client_free(client);
-	
-		/* this must be long enough to allow the device to run the iBEC */
-		/* FIXME: Probably better to detect if the device is back then */
-		sleep(7);
+
+		debug("Waiting for device to disconnect...\n");
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 10);
+		if (client->mode != &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
+			if (!(client->flags & FLAG_QUIT)) {
+				error("ERROR: Device did not disconnect. Possibly invalid iBEC. Reset device and try again.\n");
+			}
+			if (delete_fs && filesystem)
+				unlink(filesystem);
+			return -2;
+		}
+		debug("Waiting for device to reconnect in recovery mode...\n");
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 10);
+		if (client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
+			if (!(client->flags & FLAG_QUIT)) {
+				error("ERROR: Device did not reconnect in recovery mode. Possibly invalid iBEC. Reset device and try again.\n");
+			}
+			if (delete_fs && filesystem)
+				unlink(filesystem);
+			return -2;
+		}
 	}
 	idevicerestore_progress(client, RESTORE_STEP_PREPARE, 0.5);
 	if (client->flags & FLAG_QUIT) {
