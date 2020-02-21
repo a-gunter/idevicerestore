@@ -226,17 +226,21 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 		return -1;
 	}
 
+	mutex_lock(&client->device_event_mutex);
 	if (recovery_send_kernelcache(client, build_identity) < 0) {
+		mutex_unlock(&client->device_event_mutex);
 		error("ERROR: Unable to send KernelCache\n");
 		return -1;
 	}
 
 	debug("DEBUG: Waiting for device to disconnect...\n");
-	WAIT_FOR(client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 30);
+	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 30000);
 	if (client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
+		mutex_unlock(&client->device_event_mutex);
 		error("ERROR: Failed to place device in restore mode\n");
 		return -1;
 	}
+	mutex_unlock(&client->device_event_mutex);
 
 	return 0;
 }
@@ -348,6 +352,10 @@ int recovery_send_ibec(struct idevicerestore_client_t* client, plist_t build_ide
 int recovery_send_applelogo(struct idevicerestore_client_t* client, plist_t build_identity) {
 	const char* component = "RestoreLogo";
 	irecv_error_t recovery_error = IRECV_E_SUCCESS;
+
+	if (!build_identity_has_component(build_identity, component)) {
+		return 0;
+	}
 
 	info("Sending %s...\n", component);
 	if (client->recovery == NULL) {

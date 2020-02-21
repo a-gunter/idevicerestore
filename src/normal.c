@@ -33,6 +33,7 @@
 #include "common.h"
 #include "normal.h"
 #include "recovery.h"
+#include "thread.h"
 
 static int normal_idevice_new(struct idevicerestore_client_t* client, idevice_t* device)
 {
@@ -164,12 +165,21 @@ irecv_device_t normal_get_irecv_device(struct idevicerestore_client_t* client)
 	lockdown_error = lockdownd_client_new_with_handshake(device, &lockdown, "idevicerestore");
 	if (!(client->flags & FLAG_ERASE) && lockdown_error == LOCKDOWN_E_PAIRING_DIALOG_RESPONSE_PENDING) {
 		info("*** Device is not paired with this computer. Please trust this computer on the device to continue. ***\n");
-		while (1) {
+		if (client->flags & FLAG_DEBUG) {
+			idevice_set_debug_level(0);
+		}
+		while (!(client->flags & FLAG_QUIT)) {
 			lockdown_error = lockdownd_client_new_with_handshake(device, &lockdown, "idevicerestore");
 			if (lockdown_error != LOCKDOWN_E_PAIRING_DIALOG_RESPONSE_PENDING) {
 				break;
 			}
 			sleep(1);
+		}
+		if (client->flags & FLAG_DEBUG) {
+			idevice_set_debug_level(1);
+		}
+		if (client->flags & FLAG_QUIT) {
+			return NULL;
 		}
 	}
 	if (lockdown_error != LOCKDOWN_E_SUCCESS) {
@@ -237,19 +247,23 @@ int normal_enter_recovery(struct idevicerestore_client_t* client)
 	lockdown = NULL;
 	device = NULL;
 
+	mutex_lock(&client->device_event_mutex);
 	debug("DEBUG: Waiting for device to disconnect...\n");
-	WAIT_FOR(client->mode != &idevicerestore_modes[MODE_NORMAL] || (client->flags & FLAG_QUIT), 60);
+	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
 	if (client->mode == &idevicerestore_modes[MODE_NORMAL] || (client->flags & FLAG_QUIT)) {
+		mutex_unlock(&client->device_event_mutex);
 		error("ERROR: Failed to place device in recovery mode\n");
 		return -1;
 	}
 
 	debug("DEBUG: Waiting for device to connect in recovery mode...\n");
-	WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 60);
+	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
 	if (client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
+		mutex_unlock(&client->device_event_mutex);
 		error("ERROR: Failed to enter recovery mode\n");
 		return -1;
 	}
+	mutex_unlock(&client->device_event_mutex);
 
 	if (recovery_client_new(client) < 0) {
 		error("ERROR: Unable to enter recovery mode\n");
