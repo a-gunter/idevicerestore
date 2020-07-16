@@ -32,6 +32,7 @@ extern "C" {
 #include <config.h>
 #endif
 
+#include <inttypes.h>
 #include <unistd.h>
 
 #include <plist/plist.h>
@@ -118,8 +119,11 @@ extern struct idevicerestore_mode_t idevicerestore_modes[];
 
 extern int idevicerestore_debug;
 
+__attribute__((format(printf, 1, 2)))
 void info(const char* format, ...);
+__attribute__((format(printf, 1, 2)))
 void error(const char* format, ...);
+__attribute__((format(printf, 1, 2)))
 void debug(const char* format, ...);
 
 void debug_plist(plist_t plist);
@@ -133,8 +137,6 @@ char *generate_guid(void);
 #include <windows.h>
 #include <unistd.h>
 #define __mkdir(path, mode) mkdir(path)
-#define FMT_qu "%I64u"
-#define FMT_016llx "%016I64x"
 #ifndef sleep
 #define sleep(x) Sleep(x*1000)
 #endif
@@ -142,8 +144,6 @@ char *generate_guid(void);
 #else
 #include <sys/stat.h>
 #define __mkdir(path, mode) mkdir(path, mode)
-#define FMT_qu "%qu"
-#define FMT_016llx "%016llx"
 #define __usleep(x) usleep(x)
 #endif
 

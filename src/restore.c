@@ -24,6 +24,7 @@
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -192,7 +193,6 @@ static int restore_idevice_new(struct idevicerestore_client_t* client, idevice_t
 			plist_t hwinfo = NULL;
 
 			if (restored_query_value(restore, "HardwareInfo", &hwinfo) != RESTORE_E_SUCCESS) {
-				
 				continue;
 			}
 
@@ -617,7 +617,7 @@ const char* restore_progress_string(unsigned int operation)
 
 static int lastop = 0;
 
-int restore_handle_previous_restore_log_msg(restored_client_t client, plist_t msg)
+static int restore_handle_previous_restore_log_msg(restored_client_t client, plist_t msg)
 {
 	plist_t node = NULL;
 	char* restorelog = NULL;
@@ -734,7 +734,7 @@ int restore_handle_status_msg(restored_client_t client, plist_t msg)
 			info("Status: X-Gold Baseband Update Failed. Defective Unit?\n");
 			break;
 		default:
-			info("Unhandled status message (" FMT_qu ")\n", (long long unsigned int)value);
+			info("Unhandled status message (%" PRIu64 ")\n", value);
 			debug_plist(msg);
 			break;
 	}
@@ -761,7 +761,7 @@ int restore_handle_status_msg(restored_client_t client, plist_t msg)
 	return result;
 }
 
-int restore_handle_bb_update_status_msg(restored_client_t client, plist_t msg)
+static int restore_handle_bb_update_status_msg(restored_client_t client, plist_t msg)
 {
 	int result = -1;
 	plist_t node = plist_dict_get_item(msg, "Accepted");
@@ -900,7 +900,7 @@ int restore_send_root_ticket(restored_client_t restore, struct idevicerestore_cl
 	return 0;
 }
 
-int restore_send_component(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, const char *component)
+int restore_send_component(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, const char* component, const char* component_name)
 {
 	unsigned int size = 0;
 	unsigned char* data = NULL;
@@ -909,7 +909,11 @@ int restore_send_component(restored_client_t restore, struct idevicerestore_clie
 	plist_t dict = NULL;
 	restored_error_t restore_error = RESTORE_E_SUCCESS;
 
-	info("About to send %s...\n", component);
+	if (component_name == NULL) {
+		component_name = component;
+	}
+
+	info("About to send %s...\n", component_name);
 
 	if (client->tss) {
 		if (tss_response_get_path_by_entry(client->tss, component, &path) < 0) {
@@ -944,19 +948,19 @@ int restore_send_component(restored_client_t restore, struct idevicerestore_clie
 	dict = plist_new_dict();
 	blob = plist_new_data((char*)data, size);
 	char compkeyname[256];
-	sprintf(compkeyname, "%sFile", component);
+	sprintf(compkeyname, "%sFile", component_name);
 	plist_dict_set_item(dict, compkeyname, blob);
 	free(data);
 
-	info("Sending %s now...\n", component);
+	info("Sending %s now...\n", component_name);
 	restore_error = restored_send(restore, dict);
 	plist_free(dict);
 	if (restore_error != RESTORE_E_SUCCESS) {
-		error("ERROR: Unable to send kernelcache data\n");
+		error("ERROR: Unable to send component %s data\n", component_name);
 		return -1;
 	}
 
-	info("Done sending %s\n", component);
+	info("Done sending %s\n", component_name);
 	return 0;
 }
 
@@ -966,11 +970,11 @@ int restore_send_nor(restored_client_t restore, struct idevicerestore_client_t* 
 	char* llb_filename = NULL;
 	char* sep_path = NULL;
 	char* restore_sep_path = NULL;
-	char firmware_path[256];
-	char manifest_file[256];
+	char firmware_path[PATH_MAX - 9];
+	char manifest_file[PATH_MAX];
 	unsigned int manifest_size = 0;
 	unsigned char* manifest_data = NULL;
-	char firmware_filename[256];
+	char firmware_filename[PATH_MAX];
 	unsigned int llb_size = 0;
 	unsigned char* llb_data = NULL;
 	plist_t dict = NULL;
@@ -1213,7 +1217,7 @@ int restore_send_nor(restored_client_t restore, struct idevicerestore_client_t* 
 
 	info("Sending NORData now...\n");
 	if (restored_send(restore, dict) != RESTORE_E_SUCCESS) {
-		error("ERROR: Unable to send NORImageData data\n");
+		error("ERROR: Unable to send NORData\n");
 		plist_free(dict);
 		return -1;
 	}
@@ -1239,7 +1243,7 @@ static const char* restore_get_bbfw_fn_for_element(const char* elem)
 		{ "RestoreDBL", "restoredbl.mbn" },
 		// Phoenix/Mav4 firmware files
 		{ "DBL", "dbl.mbn" },
-		{ "ENANDPRG", "ENPRG.mbn" },	
+		{ "ENANDPRG", "ENPRG.mbn" },
 		// Mav5 firmware files
 		{ "RestoreSBL1", "restoresbl1.mbn" },
 		{ "SBL1", "sbl1.mbn" },
@@ -1597,7 +1601,7 @@ leave:
 	return res;
 }
 
-int restore_send_baseband_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t message)
+static int restore_send_baseband_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t message)
 {
 	int res = -1;
 	uint64_t bb_cert_id = 0;
@@ -1695,7 +1699,7 @@ int restore_send_baseband_data(restored_client_t restore, struct idevicerestore_
 		return -1;
 	}
 	char* bbfwpath = NULL;
-	plist_get_string_val(bbfw_path, &bbfwpath);	
+	plist_get_string_val(bbfw_path, &bbfwpath);
 	if (!bbfwpath) {
 		error("ERROR: Unable to get baseband path\n");
 		plist_free(response);
@@ -1729,7 +1733,7 @@ int restore_send_baseband_data(restored_client_t restore, struct idevicerestore_
 	}
 
 	res = -1;
-	
+
 	size_t sz = 0;
 	if (read_file(bbfwtmp, (void**)&buffer, &sz) < 0) {
 		error("ERROR: could not read updated bbfw archive\n");
@@ -1788,34 +1792,44 @@ int restore_send_fdr_trust_data(restored_client_t restore, idevice_t device)
 	return 0;
 }
 
-int restore_send_fud_data(restored_client_t restore, struct idevicerestore_client_t *client, plist_t build_identity, plist_t message)
+static int restore_send_image_data(restored_client_t restore, struct idevicerestore_client_t *client, plist_t build_identity, plist_t message, const char *image_list_k, const char *image_type_k, const char *image_data_k)
 {
 	restored_error_t restore_error;
 	plist_t arguments;
 	plist_t dict;
 	plist_t node;
-	plist_t fud_images = NULL;
-	plist_t fud_dict = NULL;
+	plist_t matched_images = NULL;
+	plist_t data_dict = NULL;
 	plist_t build_id_manifest;
 	plist_dict_iter iter = NULL;
 	char *image_name = NULL;
 	int want_image_list = 0;
 
 	arguments = plist_dict_get_item(message, "Arguments");
-	want_image_list = _plist_dict_get_bool(arguments, "FUDImageList");
+	want_image_list = _plist_dict_get_bool(arguments, image_list_k);
 	node = plist_dict_get_item(arguments, "ImageName");
 	if (node) {
 		plist_get_string_val(node, &image_name);
 	}
+	if (!image_type_k) {
+		node = plist_dict_get_item(arguments, "ImageType");
+		if (node) {
+			image_type_k = plist_get_string_ptr(node, NULL);
+		}
+	}
+	if (!image_type_k) {
+		error("ERROR: missing ImageType");
+		return -1;
+	}
 
 	if (!want_image_list && !image_name) {
-		info("About to send FUD data...\n");
+		info("About to send %s...\n", image_data_k);
 	}
 
 	if (want_image_list) {
-		fud_images = plist_new_array();
+		matched_images = plist_new_array();
 	} else {
-		fud_dict = plist_new_dict();
+		data_dict = plist_new_dict();
 	}
 
 	build_id_manifest = plist_dict_get_item(build_identity, "Manifest");
@@ -1830,15 +1844,15 @@ int restore_send_fud_data(restored_client_t restore, struct idevicerestore_clien
 			manifest_entry = NULL;
 			plist_dict_next_item(build_id_manifest, iter, &component, &manifest_entry);
 			if (component && manifest_entry && plist_get_node_type(manifest_entry) == PLIST_DICT) {
-				uint8_t is_fud = 0;
-				plist_t is_fud_node = plist_access_path(manifest_entry, 2, "Info", "IsFUDFirmware");
-				if (is_fud_node && plist_get_node_type(is_fud_node) == PLIST_BOOLEAN) {
-					plist_get_bool_val(is_fud_node, &is_fud);
+				uint8_t is_image_type = 0;
+				plist_t is_image_type_node = plist_access_path(manifest_entry, 2, "Info", image_type_k);
+				if (is_image_type_node && plist_get_node_type(is_image_type_node) == PLIST_BOOLEAN) {
+					plist_get_bool_val(is_image_type_node, &is_image_type);
 				}
-				if (is_fud) {
+				if (is_image_type) {
 					if (want_image_list) {
-						info("Found FUD component '%s'\n", component);
-						plist_array_append_item(fud_images, plist_new_string(component));
+						info("Found %s component %s\n", image_type_k, component);
+						plist_array_append_item(matched_images, plist_new_string(component));
 					} else if (!image_name || !strcmp(image_name, component)) {
 						char *path = NULL;
 						unsigned char* data = NULL;
@@ -1848,7 +1862,7 @@ int restore_send_fud_data(restored_client_t restore, struct idevicerestore_clien
 						int ret = -1;
 
 						if (!image_name) {
-							info("Found FUD component '%s'\n", component);
+							info("Found %s component '%s'\n", image_type_k, component);
 						}
 						build_identity_get_component_path(build_identity, component, &path);
 						if (path) {
@@ -1867,7 +1881,7 @@ int restore_send_fud_data(restored_client_t restore, struct idevicerestore_clien
 							error("ERROR: Unable to get personalized component: %s\n", component);
 						}
 
-						plist_dict_set_item(fud_dict, component, plist_new_data((const char*)data, size));
+						plist_dict_set_item(data_dict, component, plist_new_data((const char*)data, size));
 						free(data);
 					}
 				}
@@ -1879,19 +1893,19 @@ int restore_send_fud_data(restored_client_t restore, struct idevicerestore_clien
 
 	dict = plist_new_dict();
 	if (want_image_list) {
-		plist_dict_set_item(dict, "FUDImageList", fud_images);
-		info("Sending FUD image list\n");
+		plist_dict_set_item(dict, image_list_k, matched_images);
+		info("Sending %s image list\n", image_type_k);
 	} else {
 		if (image_name) {
-			node = plist_dict_get_item(fud_dict, image_name);
+			node = plist_dict_get_item(data_dict, image_name);
 			if (node) {
-				plist_dict_set_item(dict, "FUDImageData", plist_copy(node));
+				plist_dict_set_item(dict, image_data_k, plist_copy(node));
 			}
 			plist_dict_set_item(dict, "ImageName", plist_new_string(image_name));
-			info("Sending FUD data for %s...\n", image_name);
+			info("Sending %s for %s...\n", image_type_k, image_name);
 		} else {
-			plist_dict_set_item(dict, "FUDImageData", fud_dict);
-			info("Sending FUD data now...\n");
+			plist_dict_set_item(dict, image_data_k, data_dict);
+			info("Sending %s now...\n", image_type_k);
 		}
 	}
 
@@ -1899,13 +1913,13 @@ int restore_send_fud_data(restored_client_t restore, struct idevicerestore_clien
 	plist_free(dict);
 	if (restore_error != RESTORE_E_SUCCESS) {
 		if (want_image_list) {
-			error("ERROR: Failed to send FUD image list (%d)\n", restore_error);
+			error("ERROR: Failed to send %s image list (%d)\n", image_type_k, restore_error);
 		} else {
 			if (image_name) {
-				error("ERROR: Failed to send FUD data for %s (%d)\n", image_name, restore_error);
+				error("ERROR: Failed to send %s for %s (%d)\n", image_type_k, image_name, restore_error);
 				free(image_name);
 			} else {
-				error("ERROR: Failed to send FUD data (%d)\n", restore_error);
+				error("ERROR: Failed to send %s (%d)\n", image_type_k, restore_error);
 			}
 		}
 		return -1;
@@ -1915,14 +1929,14 @@ int restore_send_fud_data(restored_client_t restore, struct idevicerestore_clien
 		if (image_name) {
 			free(image_name);
 		} else {
-			info("Done sending FUD data\n");
+			info("Done sending %s\n", image_type_k);
 		}
 	}
 
 	return 0;
 }
 
-plist_t restore_get_se_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
+static plist_t restore_get_se_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
 {
 	const char *comp_name = NULL;
 	char *comp_path = NULL;
@@ -1942,7 +1956,7 @@ plist_t restore_get_se_firmware_data(restored_client_t restore, struct idevicere
 	} else if (chip_id == 0x73 || chip_id == 0x64 || chip_id == 0xC8) {
 		comp_name = "SE,UpdatePayload";
 	} else {
-		info("WARNING: Unknown SE,ChipID 0x%x detected. Restore might fail.\n", chip_id);
+		info("WARNING: Unknown SE,ChipID 0x%" PRIx64 " detected. Restore might fail.\n", (uint64_t)chip_id);
 		if (build_identity_has_component(build_identity, "SE,UpdatePayload"))
 			comp_name = "SE,UpdatePayload";
 		else if (build_identity_has_component(build_identity, "SE,Firmware"))
@@ -1955,7 +1969,7 @@ plist_t restore_get_se_firmware_data(restored_client_t restore, struct idevicere
 	}
 
 	if (build_identity_get_component_path(build_identity, comp_name, &comp_path) < 0) {
-		error("ERROR: Unable get path for '%s' component\n", comp_name);
+		error("ERROR: Unable to get path for '%s' component\n", comp_name);
 		return NULL;
 	}
 
@@ -2011,7 +2025,7 @@ plist_t restore_get_se_firmware_data(restored_client_t restore, struct idevicere
 	return response;
 }
 
-plist_t restore_get_savage_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
+static plist_t restore_get_savage_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
 {
 	char *comp_name = NULL;
 	char *comp_path = NULL;
@@ -2068,7 +2082,7 @@ plist_t restore_get_savage_firmware_data(restored_client_t restore, struct idevi
 
 	/* now get actual component data */
 	if (build_identity_get_component_path(build_identity, comp_name, &comp_path) < 0) {
-		error("ERROR: Unable get path for '%s' component\n", comp_name);
+		error("ERROR: Unable to get path for '%s' component\n", comp_name);
 		free(comp_name);
 		return NULL;
 	}
@@ -2103,7 +2117,7 @@ plist_t restore_get_savage_firmware_data(restored_client_t restore, struct idevi
 	return response;
 }
 
-plist_t restore_get_yonkers_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
+static plist_t restore_get_yonkers_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
 {
 	char *comp_name = NULL;
 	char *comp_path = NULL;
@@ -2161,7 +2175,7 @@ plist_t restore_get_yonkers_firmware_data(restored_client_t restore, struct idev
 	}
 
 	if (build_identity_get_component_path(build_identity, comp_name, &comp_path) < 0) {
-		error("ERROR: Unable get path for '%s' component\n", comp_name);
+		error("ERROR: Unable to get path for '%s' component\n", comp_name);
 		free(comp_name);
 		return NULL;
 	}
@@ -2189,7 +2203,7 @@ plist_t restore_get_yonkers_firmware_data(restored_client_t restore, struct idev
 	return response;
 }
 
-plist_t restore_get_rose_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
+static plist_t restore_get_rose_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
 {
 	char *comp_name = NULL;
 	char *comp_path = NULL;
@@ -2251,7 +2265,7 @@ plist_t restore_get_rose_firmware_data(restored_client_t restore, struct idevice
 
 	comp_name = "Rap,RTKitOS";
 	if (build_identity_get_component_path(build_identity, comp_name, &comp_path) < 0) {
-		error("ERROR: Unable get path for '%s' component\n", comp_name);
+		error("ERROR: Unable to get path for '%s' component\n", comp_name);
 		return NULL;
 	}
 	ret = extract_component(client->ipsw, comp_path, &component_data, &component_size);
@@ -2263,26 +2277,24 @@ plist_t restore_get_rose_firmware_data(restored_client_t restore, struct idevice
 	}
 	if (ftab_parse(component_data, component_size, &ftab, &ftag) != 0) {
 		free(component_data);
-		error("ERROR: Failed to parse '%s' component data.\n");
+		error("ERROR: Failed to parse '%s' component data.\n", comp_name);
 		return NULL;
 	}
 	free(component_data);
 	component_data = NULL;
 	component_size = 0;
 	if (ftag != 'rkos') {
-		error("WARNING: Unexpected tag 0x%08x, expected 0x%08x; continuing anyway.", ftag, 'rkos');
+		error("WARNING: Unexpected tag 0x%08x, expected 0x%08x; continuing anyway.\n", ftag, 'rkos');
 	}
 
-	// This component is missing on iOS 13.4... Ignore if missing?
 	comp_name = "Rap,RestoreRTKitOS";
-	if (build_identity_get_component_path(build_identity, comp_name, &comp_path) < 0) {
-		//ftab_free(ftab);
-		//error("ERROR: Unable get path for '%s' component\n", comp_name);
-		info("WARNING: Unable get path for '%s' component\n", comp_name);
-		//debug_plist(build_identity);
-		//return NULL;
-	}
-	else {
+	if (build_identity_has_component(build_identity, comp_name)) {
+		if (build_identity_get_component_path(build_identity, comp_name, &comp_path) < 0) {
+			ftab_free(ftab);
+			error("ERROR: Unable to get path for '%s' component\n", comp_name);
+			return NULL;
+		}
+>>>>>>> 8ebee55718190c5bec5fb24128f2e3b986174397
 		ret = extract_component(client->ipsw, comp_path, &component_data, &component_size);
 		free(comp_path);
 		comp_path = NULL;
@@ -2296,14 +2308,14 @@ plist_t restore_get_rose_firmware_data(restored_client_t restore, struct idevice
 		if (ftab_parse(component_data, component_size, &rftab, &ftag) != 0) {
 			free(component_data);
 			ftab_free(ftab);
-			error("ERROR: Failed to parse '%s' component data.\n");
+			error("ERROR: Failed to parse '%s' component data.\n", comp_name);
 			return NULL;
 		}
 		free(component_data);
 		component_data = NULL;
 		component_size = 0;
 		if (ftag != 'rkos') {
-			error("WARNING: Unexpected tag 0x%08x, expected 0x%08x; continuing anyway.", ftag, 'rkos');
+			error("WARNING: Unexpected tag 0x%08x, expected 0x%08x; continuing anyway.\n", ftag, 'rkos');
 		}
 
 		if (ftab_get_entry_ptr(rftab, 'rrko', &component_data, &component_size) == 0) {
@@ -2312,9 +2324,12 @@ plist_t restore_get_rose_firmware_data(restored_client_t restore, struct idevice
 			error("ERROR: Could not find 'rrko' entry in ftab. This will probably break things.\n");
 		}
 		ftab_free(rftab);
+		component_data = NULL;
+		component_size = 0;
+	} else {
+		info("NOTE: Build identity does not have a '%s' component.\n", comp_name);
 	}
-	component_data = NULL;
-	component_size = 0;	
+
 	ftab_write(ftab, &component_data, &component_size);
 	ftab_free(ftab);
 
@@ -2326,7 +2341,7 @@ plist_t restore_get_rose_firmware_data(restored_client_t restore, struct idevice
 	return response;
 }
 
-plist_t restore_get_veridian_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
+static plist_t restore_get_veridian_firmware_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t p_info)
 {
 	char *comp_name = "BMU,FirmwareMap";
 	char *comp_path = NULL;
@@ -2376,7 +2391,7 @@ plist_t restore_get_veridian_firmware_data(restored_client_t restore, struct ide
 	}
 
 	if (build_identity_get_component_path(build_identity, comp_name, &comp_path) < 0) {
-		error("ERROR: Unable get path for '%s' component\n", comp_name);
+		error("ERROR: Unable to get path for '%s' component\n", comp_name);
 		return NULL;
 	}
 
@@ -2424,7 +2439,7 @@ plist_t restore_get_veridian_firmware_data(restored_client_t restore, struct ide
 	return response;
 }
 
-int restore_send_firmware_updater_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t message)
+static int restore_send_firmware_updater_data(restored_client_t restore, struct idevicerestore_client_t* client, plist_t build_identity, plist_t message)
 {
 	plist_t arguments;
 	plist_t p_type, p_updater_name, p_loop_count, p_info;
@@ -2436,7 +2451,7 @@ int restore_send_firmware_updater_data(restored_client_t restore, struct idevice
 	int restore_error;
 
 	if (idevicerestore_debug) {
-		debug("DEBUG: Got FirmwareUpdaterData request:\n", __func__);
+		debug("DEBUG: %s: Got FirmwareUpdaterData request:\n", __func__);
 		debug_plist(message);
 	}
 
@@ -2542,14 +2557,13 @@ error_out:
 
 int restore_handle_data_request_msg(struct idevicerestore_client_t* client, idevice_t device, restored_client_t restore, plist_t message, plist_t build_identity, const char* filesystem)
 {
-	char* type = NULL;
 	plist_t node = NULL;
 
 	// checks and see what kind of data restored is requests and pass
 	// the request to its own handler
 	node = plist_dict_get_item(message, "DataType");
 	if (node && PLIST_STRING == plist_get_node_type(node)) {
-		plist_get_string_val(node, &type);
+		const char *type = plist_get_string_ptr(node, NULL);
 
 		// this request is sent when restored is ready to receive the filesystem
 		if (!strcmp(type, "SystemImageData")) {
@@ -2568,15 +2582,29 @@ int restore_handle_data_request_msg(struct idevicerestore_client_t* client, idev
 		}
 		// send KernelCache
 		else if (!strcmp(type, "KernelCache")) {
-			if (restore_send_component(restore, client, build_identity, "KernelCache") < 0) {
+			if (restore_send_component(restore, client, build_identity, "KernelCache", NULL) < 0) {
 				error("ERROR: Unable to send kernelcache\n");
 				return -1;
 			}
 		}
 
 		else if (!strcmp(type, "DeviceTree")) {
-			if (restore_send_component(restore, client, build_identity, "DeviceTree") < 0) {
+			if (restore_send_component(restore, client, build_identity, "DeviceTree", NULL) < 0) {
 				error("ERROR: Unable to send DeviceTree\n");
+				return -1;
+			}
+		}
+
+		else if (!strcmp(type, "SystemImageRootHash")) {
+			if (restore_send_component(restore, client, build_identity, "SystemVolume", type) < 0) {
+				error("ERROR: Unable to send SystemImageRootHash data\n");
+				return -1;
+			}
+		}
+
+		else if (!strcmp(type, "SystemImageCanonicalMetadata")) {
+			if (restore_send_component(restore, client, build_identity, "Ap,SystemVolumeCanonicalMetadata", type) < 0) {
+				error("ERROR: Unable to send SystemImageCanonicalMetadata data\n");
 				return -1;
 			}
 		}
@@ -2608,7 +2636,7 @@ int restore_handle_data_request_msg(struct idevicerestore_client_t* client, idev
 		}
 
 		else if (!strcmp(type, "FUDData")) {
-			if(restore_send_fud_data(restore, client, build_identity, message) < 0) {
+			if(restore_send_image_data(restore, client, build_identity, message, "FUDImageList", "IsFUDFirmware", "FUDImageData") < 0) {
 				error("ERROR: Unable to send FUD data\n");
 				return -1;
 			}
@@ -2617,6 +2645,20 @@ int restore_handle_data_request_msg(struct idevicerestore_client_t* client, idev
 		else if (!strcmp(type, "FirmwareUpdaterData")) {
 			if(restore_send_firmware_updater_data(restore, client, build_identity, message) < 0) {
 				error("ERROR: Unable to send FirmwareUpdater data\n");
+				return -1;
+			}
+		}
+
+		else if (!strcmp(type, "PersonalizedData")) {
+			if(restore_send_image_data(restore, client, build_identity, message, "ImageList", NULL, "ImageData") < 0) {
+				error("ERROR: Unable to send Personalized data\n");
+				return -1;
+			}
+		}
+
+		else if (!strcmp(type, "EANData")) {
+			if(restore_send_image_data(restore, client, build_identity, message, "EANImageList", "IsEarlyAccessFirmware", "EANData") < 0) {
+				error("ERROR: Unable to send Personalized data\n");
 				return -1;
 			}
 		}
@@ -2677,7 +2719,7 @@ int restore_device(struct idevicerestore_client_t* client, plist_t build_identit
 		node = plist_dict_get_item(hwinfo, "UniqueChipID");
 		if (node && plist_get_node_type(node) == PLIST_UINT) {
 			plist_get_uint_val(node, &i);
-			info("UniqueChipID: " FMT_qu "\n", (long long unsigned int)i);
+			info("UniqueChipID: %" PRIu64 "\n", i);
 		}
 
 		node = plist_dict_get_item(hwinfo, "ProductionMode");
@@ -2741,7 +2783,7 @@ int restore_device(struct idevicerestore_client_t* client, plist_t build_identit
 
 	if (client->preflight_info) {
 		plist_t node;
-		plist_t bbus = plist_copy(client->preflight_info);	
+		plist_t bbus = plist_copy(client->preflight_info);
 
 		plist_dict_remove_item(bbus, "FusingStatus");
 		plist_dict_remove_item(bbus, "PkHash");
