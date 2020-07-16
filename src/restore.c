@@ -2294,7 +2294,6 @@ static plist_t restore_get_rose_firmware_data(restored_client_t restore, struct 
 			error("ERROR: Unable to get path for '%s' component\n", comp_name);
 			return NULL;
 		}
->>>>>>> 8ebee55718190c5bec5fb24128f2e3b986174397
 		ret = extract_component(client->ipsw, comp_path, &component_data, &component_size);
 		free(comp_path);
 		comp_path = NULL;
