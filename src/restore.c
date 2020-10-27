@@ -698,6 +698,7 @@ int restore_handle_progress_msg(struct idevicerestore_client_t* client, plist_t 
 			break;
 		case UPDATE_ROSE:
 		case UPDATE_VERIDIAN:
+		case REQUESTING_EAN_DATA:
 			break;
 		default:
 			debug("Unhandled progress operation %d (%d)\n", adapted_operation, (int)operation);
@@ -1283,6 +1284,8 @@ static const char* restore_get_bbfw_fn_for_element(const char* elem)
 		// ICE19 firmware files
 		{ "RestorePSI2", "restorepsi2.bin" },
 		{ "PSI2", "psi_ram2.bin" },
+		// Mav20 Firmware file
+		{ "Misc", "multi_image.mbn" },
 		{ NULL, NULL }
 	};
 
