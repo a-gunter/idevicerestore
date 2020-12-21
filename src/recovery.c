@@ -221,10 +221,18 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 	}
 
 	/* send devicetree and load it */
-	if (recovery_send_devicetree(client, build_identity) < 0) {
+	if (recovery_send_component_and_command(client, build_identity, "RestoreDeviceTree", "devicetree") < 0) {
 		error("ERROR: Unable to send DeviceTree\n");
 		return -1;
 	}
+    
+    if (build_identity_has_component(build_identity, "RestoreSEP")) {
+        /* send rsepfirmware and load it */
+        if (recovery_send_component_and_command(client, build_identity, "RestoreSEP", "rsepfirmware") < 0) {
+            error("ERROR: Unable to send RestoreSEP\n");
+            return -1;
+        }
+    }
 
 	mutex_lock(&client->device_event_mutex);
 	if (recovery_send_kernelcache(client, build_identity) < 0) {
@@ -276,7 +284,8 @@ int recovery_send_ticket(struct idevicerestore_client_t* client)
 	return 0;
 }
 
-int recovery_send_component(struct idevicerestore_client_t* client, plist_t build_identity, const char* component) {
+int recovery_send_component(struct idevicerestore_client_t* client, plist_t build_identity, const char* component)
+{
 	unsigned int size = 0;
 	unsigned char* data = NULL;
 	char* path = NULL;
@@ -322,6 +331,24 @@ int recovery_send_component(struct idevicerestore_client_t* client, plist_t buil
 	}
 
 	return 0;
+}
+
+int recovery_send_component_and_command(struct idevicerestore_client_t* client, plist_t build_identity, const char* component, const char* command)
+{
+    irecv_error_t recovery_error = IRECV_E_SUCCESS;
+
+    if (recovery_send_component(client, build_identity, component) < 0) {
+        error("ERROR: Unable to send %s to device.\n", component);
+        return -1;
+    }
+
+    recovery_error = irecv_send_command(client->recovery->client, command);
+    if (recovery_error != IRECV_E_SUCCESS) {
+        error("ERROR: Unable to execute %s\n", component);
+        return -1;
+    }
+
+    return 0;
 }
 
 int recovery_send_ibec(struct idevicerestore_client_t* client, plist_t build_identity) {
@@ -384,31 +411,8 @@ int recovery_send_applelogo(struct idevicerestore_client_t* client, plist_t buil
 	return 0;
 }
 
-int recovery_send_devicetree(struct idevicerestore_client_t* client, plist_t build_identity) {
-	const char* component = "RestoreDeviceTree";
-	irecv_error_t recovery_error = IRECV_E_SUCCESS;
-
-	if(client->recovery == NULL) {
-		if (recovery_client_new(client) < 0) {
-			return -1;
-		}
-	}
-
-	if (recovery_send_component(client, build_identity, component) < 0) {
-		error("ERROR: Unable to send %s to device.\n", component);
-		return -1;
-	}
-
-	recovery_error = irecv_send_command(client->recovery->client, "devicetree");
-	if (recovery_error != IRECV_E_SUCCESS) {
-		error("ERROR: Unable to execute %s\n", component);
-		return -1;
-	}
-
-	return 0;
-}
-
-int recovery_send_loaded_by_iboot(struct idevicerestore_client_t* client, plist_t build_identity) {
+int recovery_send_loaded_by_iboot(struct idevicerestore_client_t* client, plist_t build_identity)
+{
 	if (client->recovery == NULL) {
 		if (recovery_client_new(client) < 0) {
 			return -1;
