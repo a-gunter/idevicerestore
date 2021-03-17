@@ -234,6 +234,14 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
         }
     }
 
+	if (build_identity_has_component(build_identity, "RestoreSEP")) {
+		/* send rsepfirmware and load it */
+		if (recovery_send_component_and_command(client, build_identity, "RestoreSEP", "rsepfirmware") < 0) {
+			error("ERROR: Unable to send RestoreSEP\n");
+			return -1;
+		}
+	}
+
 	mutex_lock(&client->device_event_mutex);
 	if (recovery_send_kernelcache(client, build_identity) < 0) {
 		mutex_unlock(&client->device_event_mutex);
@@ -440,14 +448,9 @@ int recovery_send_loaded_by_iboot(struct idevicerestore_client_t* client, plist_
 			plist_get_bool_val(iboot_node, &b);
 			if (b) {
 				debug("DEBUG: %s is loaded by iBoot.\n", key);
-				if (recovery_send_component(client, build_identity, key) < 0) {
+				if (recovery_send_component_and_command(client, build_identity, key, "firmware") < 0) {
 					error("ERROR: Unable to send component '%s' to device.\n", key);
 					err++;
-				} else {
-					if (irecv_send_command(client->recovery->client, "firmware") != IRECV_E_SUCCESS) {
-						error("ERROR: iBoot command 'firmware' failed for component '%s'\n", key);
-						err++;
-					}
 				}
 			}
 		}
