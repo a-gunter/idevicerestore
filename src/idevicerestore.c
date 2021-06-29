@@ -38,6 +38,13 @@
 
 #include <curl/curl.h>
 
+#ifdef HAVE_OPENSSL
+#include <openssl/sha.h>
+#else
+#include "sha512.h"
+#define SHA384 sha384
+#endif
+
 #include "dfu.h"
 #include "tss.h"
 #include "img3.h"
@@ -137,6 +144,13 @@ static void usage(int argc, char* argv[], int err)
 }
 #endif
 
+const uint8_t lpol_file[22] = {
+		0x30, 0x14, 0x16, 0x04, 0x49, 0x4d, 0x34, 0x50,
+		0x16, 0x04,	0x6c, 0x70,	0x6f, 0x6c,	0x16, 0x03,
+		0x31, 0x2e, 0x30, 0x04,	0x01, 0x00
+};
+const uint32_t lpol_file_length = 22;
+
 static int idevicerestore_keep_pers = 0;
 
 static int load_version_data(struct idevicerestore_client_t* client)
@@ -233,13 +247,13 @@ static void idevice_event_cb(const idevice_event_t *event, void *userdata)
 		}
 		if (normal_check_mode(client) == 0) {
 			mutex_lock(&client->device_event_mutex);
-			client->mode = &idevicerestore_modes[MODE_NORMAL];
+			client->mode = MODE_NORMAL;
 			debug("%s: device %016" PRIx64 " (udid: %s) connected in normal mode\n", __func__, client->ecid, client->udid);
 			cond_signal(&client->device_event_cond);
 			mutex_unlock(&client->device_event_mutex);
 		} else if (client->ecid && restore_check_mode(client) == 0) {
 			mutex_lock(&client->device_event_mutex);
-			client->mode = &idevicerestore_modes[MODE_RESTORE];
+			client->mode = MODE_RESTORE;
 			debug("%s: device %016" PRIx64 " (udid: %s) connected in restore mode\n", __func__, client->ecid, client->udid);
 			cond_signal(&client->device_event_cond);
 			mutex_unlock(&client->device_event_mutex);
@@ -247,7 +261,7 @@ static void idevice_event_cb(const idevice_event_t *event, void *userdata)
 	} else if (event->event == IDEVICE_DEVICE_REMOVE) {
 		if (client->udid && !strcmp(event->udid, client->udid)) {
 			mutex_lock(&client->device_event_mutex);
-			client->mode = &idevicerestore_modes[MODE_UNKNOWN];
+			client->mode = MODE_UNKNOWN;
 			debug("%s: device %016" PRIx64 " (udid: %s) disconnected\n", __func__, client->ecid, client->udid);
 			client->ignore_device_add_events = 0;
 			cond_signal(&client->device_event_cond);
@@ -267,19 +281,19 @@ static void irecv_event_cb(const irecv_device_event_t* event, void *userdata)
 			mutex_lock(&client->device_event_mutex);
 			switch (event->mode) {
 				case IRECV_K_WTF_MODE:
-					client->mode = &idevicerestore_modes[MODE_WTF];
+					client->mode = MODE_WTF;
 					break;
 				case IRECV_K_DFU_MODE:
-					client->mode = &idevicerestore_modes[MODE_DFU];
+					client->mode = MODE_DFU;
 					break;
 				case IRECV_K_RECOVERY_MODE_1:
 				case IRECV_K_RECOVERY_MODE_2:
 				case IRECV_K_RECOVERY_MODE_3:
 				case IRECV_K_RECOVERY_MODE_4:
-					client->mode = &idevicerestore_modes[MODE_RECOVERY];
+					client->mode = MODE_RECOVERY;
 					break;
 				default:
-					client->mode = &idevicerestore_modes[MODE_UNKNOWN];
+					client->mode = MODE_UNKNOWN;
 			}
 			debug("%s: device %016" PRIx64 " (udid: %s) connected in %s mode\n", __func__, client->ecid, (client->udid) ? client->udid : "N/A", client->mode->string);
 			cond_signal(&client->device_event_cond);
@@ -288,7 +302,7 @@ static void irecv_event_cb(const irecv_device_event_t* event, void *userdata)
 	} else if (event->type == IRECV_DEVICE_REMOVE) {
 		if (client->ecid && event->device_info->ecid == client->ecid) {
 			mutex_lock(&client->device_event_mutex);
-			client->mode = &idevicerestore_modes[MODE_UNKNOWN];
+			client->mode = MODE_UNKNOWN;
 			debug("%s: device %016" PRIx64 " (udid: %s) disconnected\n", __func__, client->ecid, (client->udid) ? client->udid : "N/A");
 			cond_signal(&client->device_event_cond);
 			mutex_unlock(&client->device_event_mutex);
@@ -331,7 +345,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	// check which mode the device is currently in so we know where to start
 	mutex_lock(&client->device_event_mutex);
 	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
-	if (client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
+	if (client->mode == MODE_UNKNOWN || (client->flags & FLAG_QUIT)) {
 		mutex_unlock(&client->device_event_mutex);
 		error("ERROR: Unable to discover device mode. Please make sure a device is attached.\n");
 		return -1;
@@ -340,7 +354,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	info("Found device in %s mode\n", client->mode->string);
 	mutex_unlock(&client->device_event_mutex);
 
-	if (client->mode->index == MODE_WTF) {
+	if (client->mode == MODE_WTF) {
 		unsigned int cpid = 0;
 
 		if (dfu_client_new(client) != 0) {
@@ -415,7 +429,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		free(wtftmp);
 
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
-		if (client->mode != &idevicerestore_modes[MODE_DFU] || (client->flags & FLAG_QUIT)) {
+		if (client->mode != MODE_DFU || (client->flags & FLAG_QUIT)) {
 			mutex_unlock(&client->device_event_mutex);
 			/* TODO: verify if it actually goes from 0x1222 -> 0x1227 */
 			error("ERROR: Failed to put device into DFU from WTF mode\n");
@@ -433,7 +447,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	idevicerestore_progress(client, RESTORE_STEP_DETECT, 0.2);
 	info("Identified device as %s, %s\n", client->device->hardware_model, client->device->product_type);
 
-	if ((client->flags & FLAG_PWN) && (client->mode->index != MODE_DFU)) {
+	if ((client->flags & FLAG_PWN) && (client->mode != MODE_DFU)) {
 		error("ERROR: you need to put your device into DFU mode to pwn it.\n");
 		return -1;
 	}
@@ -441,7 +455,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	if (client->flags & FLAG_PWN) {
 		recovery_client_free(client);
 
-		if (client->mode->index != MODE_DFU) {
+		if (client->mode != MODE_DFU) {
 			error("ERROR: Device needs to be in DFU mode for this option.\n");
 			return -1;
 		}
@@ -576,7 +590,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		return 0;
 	}
 
-	if (client->mode->index == MODE_RESTORE) {
+	if (client->mode == MODE_RESTORE) {
 		if (client->flags & FLAG_ALLOW_RESTORE_MODE) {
 			tss_enabled = 0;
 			if (!client->root_ticket) {
@@ -592,7 +606,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			// we need to refresh the current mode again
 			mutex_lock(&client->device_event_mutex);
 			cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
-			if (client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
+			if (client->mode == MODE_UNKNOWN || (client->flags & FLAG_QUIT)) {
 				mutex_unlock(&client->device_event_mutex);
 				error("ERROR: Unable to discover device mode. Please make sure a device is attached.\n");
 				return -1;
@@ -817,7 +831,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	/* print information about current build identity */
 	build_identity_print_information(build_identity);
 
-	if (client->mode->index == MODE_NORMAL && !(client->flags & FLAG_ERASE) && !(client->flags & FLAG_SHSHONLY)) {
+	if (client->mode == MODE_NORMAL && !(client->flags & FLAG_ERASE) && !(client->flags & FLAG_SHSHONLY)) {
 		plist_t pver = normal_get_lockdown_value(client, NULL, "ProductVersion");
 		char *device_version = NULL;
 		if (pver) {
@@ -1016,7 +1030,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		}
 		info("Found ECID %" PRIu64 "\n", client->ecid);
 
-		if (client->mode->index == MODE_NORMAL && !(client->flags & FLAG_ERASE) && !(client->flags & FLAG_SHSHONLY)) {
+		if (client->mode == MODE_NORMAL && !(client->flags & FLAG_ERASE) && !(client->flags & FLAG_SHSHONLY)) {
 			plist_t node = normal_get_lockdown_value(client, NULL, "HasSiDP");
 			uint8_t needs_preboard = 0;
 			if (node && plist_get_node_type(node) == PLIST_BOOLEAN) {
@@ -1067,10 +1081,23 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		if (client->flags & FLAG_QUIT) {
 			return -1;
 		}
+		
 		if (get_tss_response(client, build_identity, &client->tss) < 0) {
 			error("ERROR: Unable to get SHSH blobs for this device\n");
 			return -1;
 		}
+		if (client->build_major >= 20) {
+			if (get_local_policy_tss_response(client, build_identity, &client->tss_localpolicy) < 0) {
+				error("ERROR: Unable to get SHSH blobs for this device (local policy)\n");
+				return -1;
+			}
+			if (get_recoveryos_root_ticket_tss_response(client, build_identity, &client->tss_recoveryos_root_ticket) <
+				0) {
+				error("ERROR: Unable to get SHSH blobs for this device (recovery OS Root Ticket)\n");
+				return -1;
+			}
+		}
+
 		if (stashbag_commit_required) {
 			plist_t ticket = plist_dict_get_item(client->tss, "ApImg4Ticket");
 			if (!ticket || plist_get_node_type(ticket) != PLIST_DATA) {
@@ -1152,7 +1179,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	}
 
 	// if the device is in normal mode, place device into recovery mode
-	if (client->mode->index == MODE_NORMAL) {
+	if (client->mode == MODE_NORMAL) {
 		info("Entering recovery mode...\n");
 		if (normal_enter_recovery(client) < 0) {
 			error("ERROR: Unable to place device into recovery mode from normal mode\n");
@@ -1170,7 +1197,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		return -1;
 	}
 
-	if (client->mode->index == MODE_DFU) {
+	if (client->mode == MODE_DFU) {
 		// if the device is in DFU mode, place it into recovery mode
 		dfu_client_free(client);
 		recovery_client_free(client);
@@ -1202,7 +1229,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 				unlink(filesystem);
 			return -2;
 		}
-	} else if (client->mode->index == MODE_RECOVERY) {
+	} else if (client->mode == MODE_RECOVERY) {
 		// device is in recovery mode
 		if ((client->build_major > 8) && !(client->flags & FLAG_CUSTOM)) {
 			if (!client->image4supported) {
@@ -1230,7 +1257,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 
 		debug("Waiting for device to disconnect...\n");
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
-		if (client->mode != &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
+		if (client->mode != MODE_UNKNOWN || (client->flags & FLAG_QUIT)) {
 			mutex_unlock(&client->device_event_mutex);
 
 			if (!(client->flags & FLAG_QUIT)) {
@@ -1242,7 +1269,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		}
 		debug("Waiting for device to reconnect in recovery mode...\n");
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
-		if (client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
+		if (client->mode != MODE_RECOVERY || (client->flags & FLAG_QUIT)) {
 			mutex_unlock(&client->device_event_mutex);
 			if (!(client->flags & FLAG_QUIT)) {
 				error("ERROR: Device did not reconnect in recovery mode. Possibly invalid iBEC. Reset device and try again.\n");
@@ -1310,7 +1337,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	}
 
 	// now finally do the magic to put the device into restore mode
-	if (client->mode->index == MODE_RECOVERY) {
+	if (client->mode == MODE_RECOVERY) {
 		if (client->srnm == NULL) {
 			error("ERROR: could not retrieve device serial number. Can't continue.\n");
 			if (delete_fs && filesystem)
@@ -1330,11 +1357,11 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	}
 	idevicerestore_progress(client, RESTORE_STEP_PREPARE, 0.9);
 
-	if (client->mode->index != MODE_RESTORE) {
+	if (client->mode != MODE_RESTORE) {
 		mutex_lock(&client->device_event_mutex);
 		info("Waiting for device to enter restore mode...\n");
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 180000);
-		if (client->mode != &idevicerestore_modes[MODE_RESTORE] || (client->flags & FLAG_QUIT)) {
+		if (client->mode != MODE_RESTORE || (client->flags & FLAG_QUIT)) {
 			mutex_unlock(&client->device_event_mutex);
 			error("ERROR: Device failed to enter restore mode.\n");
 			error("Please make sure that usbmuxd is running.\n");
@@ -1346,7 +1373,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	}
 
 	// device is finally in restore mode, let's do this
-	if (client->mode->index == MODE_RESTORE) {
+	if (client->mode == MODE_RESTORE) {
 		if ((client->flags & FLAG_NO_RESTORE) != 0) {
 			info("Device is now in restore mode. Exiting as requested.");
 			return 0;
@@ -1402,7 +1429,7 @@ struct idevicerestore_client_t* idevicerestore_client_new(void)
 		return NULL;
 	}
 	memset(client, '\0', sizeof(struct idevicerestore_client_t));
-	client->mode = &idevicerestore_modes[MODE_UNKNOWN];
+	client->mode = MODE_UNKNOWN;
 	mutex_init(&client->device_event_mutex);
 	cond_init(&client->device_event_cond);
 	return client;
@@ -1546,7 +1573,7 @@ int main(int argc, char* argv[]) {
 	struct idevicerestore_client_t* client = idevicerestore_client_new();
 	if (client == NULL) {
 		error("ERROR: could not create idevicerestore client\n");
-		return -1;
+		return EXIT_FAILURE;
 	}
 
 	idevicerestore_client = client;
@@ -1576,7 +1603,7 @@ int main(int argc, char* argv[]) {
 		switch (opt) {
 		case 'h':
 			usage(argc, argv, 0);
-			return 0;
+			return EXIT_SUCCESS;
 
 		case 'd':
 			client->flags |= FLAG_DEBUG;
@@ -1611,7 +1638,7 @@ int main(int argc, char* argv[]) {
 				}
 				if (client->ecid == 0) {
 					error("ERROR: Could not parse ECID from '%s'\n", optarg);
-					return -1;
+					return EXIT_FAILURE;
 				}
 			}
 			break;
@@ -1620,7 +1647,7 @@ int main(int argc, char* argv[]) {
 			if (!*optarg) {
 				error("ERROR: UDID must not be empty!\n");
 				usage(argc, argv, 1);
-				return -1;
+				return EXIT_FAILURE;
 			}
 			client->udid = strdup(optarg);
 			break;
@@ -1663,13 +1690,13 @@ int main(int argc, char* argv[]) {
 
 		case 'v':
 			info("%s %s\n", PACKAGE_NAME, PACKAGE_VERSION);
-			return 0;
+			return EXIT_SUCCESS;
 
 		case 'T': {
 			size_t root_ticket_len = 0;
 			unsigned char* root_ticket = NULL;
 			if (read_file(optarg, (void**)&root_ticket, &root_ticket_len) != 0) {
-				return -1;
+				return EXIT_FAILURE;
 			}
 			client->root_ticket = root_ticket;
 			client->root_ticket_len = (int)root_ticket_len;
@@ -1679,7 +1706,7 @@ int main(int argc, char* argv[]) {
 
 		default:
 			usage(argc, argv, 1);
-			return -1;
+			return EXIT_FAILURE;
 		}
 	}
 
@@ -1690,12 +1717,12 @@ int main(int argc, char* argv[]) {
 		ipsw = argv[0];
 	} else {
 		usage(argc, argv, 1);
-		return -1;
+		return EXIT_FAILURE;
 	}
 
 	if ((client->flags & FLAG_LATEST) && (client->flags & FLAG_CUSTOM)) {
 		error("ERROR: You can't use --custom and --latest options at the same time.\n");
-		return -1;
+		return EXIT_FAILURE;
 	}
 
 	if (ipsw) {
@@ -1710,54 +1737,27 @@ int main(int argc, char* argv[]) {
 
 	curl_global_cleanup();
 
-	return result;
+	return (result == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 #endif
 
-int check_mode(struct idevicerestore_client_t* client) {
-	int mode = MODE_UNKNOWN;
-	int dfumode = MODE_UNKNOWN;
-
-	if (recovery_check_mode(client) == 0) {
-		mode = MODE_RECOVERY;
-	}
-
-	else if (dfu_check_mode(client, &dfumode) == 0) {
-		mode = dfumode;
-	}
-
-	else if (normal_check_mode(client) == 0) {
-		mode = MODE_NORMAL;
-	}
-
-	else if (restore_check_mode(client) == 0) {
-		mode = MODE_RESTORE;
-	}
-
-	if (mode == MODE_UNKNOWN) {
-		client->mode = NULL;
-	} else {
-		client->mode = &idevicerestore_modes[mode];
-	}
-	return mode;
-}
-
-irecv_device_t get_irecv_device(struct idevicerestore_client_t *client) {
-	int mode = MODE_UNKNOWN;
+irecv_device_t get_irecv_device(struct idevicerestore_client_t *client)
+{
+	int mode = _MODE_UNKNOWN;
 
 	if (client->mode) {
 		mode = client->mode->index;
 	}
 
 	switch (mode) {
-	case MODE_RESTORE:
+	case _MODE_RESTORE:
 		return restore_get_irecv_device(client);
 
-	case MODE_NORMAL:
+	case _MODE_NORMAL:
 		return normal_get_irecv_device(client);
 
-	case MODE_DFU:
-	case MODE_RECOVERY:
+	case _MODE_DFU:
+	case _MODE_RECOVERY:
 		return dfu_get_irecv_device(client);
 
 	default:
@@ -1768,23 +1768,23 @@ irecv_device_t get_irecv_device(struct idevicerestore_client_t *client) {
 int is_image4_supported(struct idevicerestore_client_t* client)
 {
 	int res = 0;
-	int mode = MODE_UNKNOWN;
+	int mode = _MODE_UNKNOWN;
 
 	if (client->mode) {
 		mode = client->mode->index;
 	}
 
 	switch (mode) {
-	case MODE_NORMAL:
+	case _MODE_NORMAL:
 		res = normal_is_image4_supported(client);
 		break;
-	case MODE_RESTORE:
+	case _MODE_RESTORE:
 		res = restore_is_image4_supported(client);
 		break;
-	case MODE_DFU:
+	case _MODE_DFU:
 		res = dfu_is_image4_supported(client);
 		break;
-	case MODE_RECOVERY:
+	case _MODE_RECOVERY:
 		res = recovery_is_image4_supported(client);
 		break;
 	default:
@@ -1794,29 +1794,30 @@ int is_image4_supported(struct idevicerestore_client_t* client)
 	return res;
 }
 
-int get_ecid(struct idevicerestore_client_t* client, uint64_t* ecid) {
-	int mode = MODE_UNKNOWN;
+int get_ecid(struct idevicerestore_client_t* client, uint64_t* ecid)
+{
+	int mode = _MODE_UNKNOWN;
 
 	if (client->mode) {
 		mode = client->mode->index;
 	}
 
 	switch (mode) {
-	case MODE_NORMAL:
+	case _MODE_NORMAL:
 		if (normal_get_ecid(client, ecid) < 0) {
 			*ecid = 0;
 			return -1;
 		}
 		break;
 
-	case MODE_DFU:
+	case _MODE_DFU:
 		if (dfu_get_ecid(client, ecid) < 0) {
 			*ecid = 0;
 			return -1;
 		}
 		break;
 
-	case MODE_RECOVERY:
+	case _MODE_RECOVERY:
 		if (recovery_get_ecid(client, ecid) < 0) {
 			*ecid = 0;
 			return -1;
@@ -1832,8 +1833,9 @@ int get_ecid(struct idevicerestore_client_t* client, uint64_t* ecid) {
 	return 0;
 }
 
-int get_ap_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, int* nonce_size) {
-	int mode = MODE_UNKNOWN;
+int get_ap_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, int* nonce_size)
+{
+	int mode = _MODE_UNKNOWN;
 
 	*nonce = NULL;
 	*nonce_size = 0;
@@ -1845,21 +1847,21 @@ int get_ap_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, 
 	}
 
 	switch (mode) {
-	case MODE_NORMAL:
+	case _MODE_NORMAL:
 		info("in normal mode... ");
 		if (normal_get_ap_nonce(client, nonce, nonce_size) < 0) {
 			info("failed\n");
 			return -1;
 		}
 		break;
-	case MODE_DFU:
+	case _MODE_DFU:
 		info("in dfu mode... ");
 		if (dfu_get_ap_nonce(client, nonce, nonce_size) < 0) {
 			info("failed\n");
 			return -1;
 		}
 		break;
-	case MODE_RECOVERY:
+	case _MODE_RECOVERY:
 		info("in recovery mode... ");
 		if (recovery_get_ap_nonce(client, nonce, nonce_size) < 0) {
 			info("failed\n");
@@ -1882,8 +1884,9 @@ int get_ap_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, 
 	return 0;
 }
 
-int get_sep_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, int* nonce_size) {
-	int mode = MODE_UNKNOWN;
+int get_sep_nonce(struct idevicerestore_client_t* client, unsigned char** nonce, int* nonce_size)
+{
+	int mode = _MODE_UNKNOWN;
 
 	*nonce = NULL;
 	*nonce_size = 0;
@@ -1895,21 +1898,21 @@ int get_sep_nonce(struct idevicerestore_client_t* client, unsigned char** nonce,
 	}
 
 	switch (mode) {
-	case MODE_NORMAL:
+	case _MODE_NORMAL:
 		info("in normal mode... ");
 		if (normal_get_sep_nonce(client, nonce, nonce_size) < 0) {
 			info("failed\n");
 			return -1;
 		}
 		break;
-	case MODE_DFU:
+	case _MODE_DFU:
 		info("in dfu mode... ");
 		if (dfu_get_sep_nonce(client, nonce, nonce_size) < 0) {
 			info("failed\n");
 			return -1;
 		}
 		break;
-	case MODE_RECOVERY:
+	case _MODE_RECOVERY:
 		info("in recovery mode... ");
 		if (recovery_get_sep_nonce(client, nonce, nonce_size) < 0) {
 			info("failed\n");
@@ -1962,6 +1965,79 @@ plist_t build_manifest_get_build_identity_for_model_with_restore_behavior(plist_
 		}
 		free(str);
 		str = NULL;
+		if (behavior) {
+			plist_t rbehavior = plist_dict_get_item(info_dict, "RestoreBehavior");
+			if (!rbehavior || plist_get_node_type(rbehavior) != PLIST_STRING) {
+				continue;
+			}
+			plist_get_string_val(rbehavior, &str);
+			if (strcasecmp(str, behavior) != 0) {
+				free(str);
+				continue;
+			} else {
+				free(str);
+				return plist_copy(ident);
+			}
+			free(str);
+		} else {
+			return plist_copy(ident);
+		}
+	}
+
+	return NULL;
+}
+
+plist_t build_manifest_get_build_identity_for_model_with_restore_behavior_and_global_signing(
+		plist_t build_manifest,
+		const char *hardware_model,
+		const char *behavior,
+		uint8_t global_signing)
+{
+	plist_t build_identities_array = plist_dict_get_item(build_manifest, "BuildIdentities");
+	if (!build_identities_array || plist_get_node_type(build_identities_array) != PLIST_ARRAY) {
+		error("ERROR: Unable to find build identities node\n");
+		return NULL;
+	}
+
+	uint32_t i;
+	for (i = 0; i < plist_array_get_size(build_identities_array); i++) {
+		plist_t ident = plist_array_get_item(build_identities_array, i);
+		if (!ident || plist_get_node_type(ident) != PLIST_DICT) {
+			continue;
+		}
+		plist_t info_dict = plist_dict_get_item(ident, "Info");
+		if (!info_dict || plist_get_node_type(ident) != PLIST_DICT) {
+			continue;
+		}
+		plist_t devclass = plist_dict_get_item(info_dict, "DeviceClass");
+		if (!devclass || plist_get_node_type(devclass) != PLIST_STRING) {
+			continue;
+		}
+		char *str = NULL;
+		plist_get_string_val(devclass, &str);
+		if (strcasecmp(str, hardware_model) != 0) {
+			free(str);
+			continue;
+		}
+		free(str);
+		str = NULL;
+
+		plist_t global_signing_node = plist_dict_get_item(info_dict, "VariantSupportsGlobalSigning");
+		if (!global_signing_node) {
+			if (global_signing) {
+				continue;
+			}
+		} else {
+			uint8_t is_global_signing;
+			plist_get_bool_val(global_signing_node, &is_global_signing);
+
+			if (global_signing && !is_global_signing) {
+				continue;
+			} else if (!global_signing && is_global_signing) {
+				continue;
+			}
+		}
+
 		if (behavior) {
 			plist_t rbehavior = plist_dict_get_item(info_dict, "RestoreBehavior");
 			if (!rbehavior || plist_get_node_type(rbehavior) != PLIST_STRING) {
@@ -2050,7 +2126,8 @@ int get_preboard_manifest(struct idevicerestore_client_t* client, plist_t build_
 	return res;
 }
 
-int get_tss_response(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* tss) {
+int get_tss_response(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* tss)
+{
 	plist_t request = NULL;
 	plist_t response = NULL;
 	*tss = NULL;
@@ -2184,7 +2261,7 @@ int get_tss_response(struct idevicerestore_client_t* client, plist_t build_ident
 		}
 	}
 
-	if (client->mode->index == MODE_NORMAL) {
+	if (client->mode == MODE_NORMAL) {
 		/* normal mode; request baseband ticket aswell */
 		plist_t pinfo = NULL;
 		normal_get_preflight_info(client, &pinfo);
@@ -2260,6 +2337,277 @@ int get_tss_response(struct idevicerestore_client_t* client, plist_t build_ident
 	return 0;
 }
 
+int get_recoveryos_root_ticket_tss_response(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* tss)
+{
+	plist_t request = NULL;
+	plist_t response = NULL;
+	*tss = NULL;
+
+	/* populate parameters */
+	plist_t parameters = plist_new_dict();
+
+	/* ApECID */
+	plist_dict_set_item(parameters, "ApECID", plist_new_uint(client->ecid));
+	plist_dict_set_item(parameters, "Ap,LocalBoot", plist_new_bool(0));
+
+	/* ApNonce */
+	if (client->nonce) {
+		plist_dict_set_item(parameters, "ApNonce", plist_new_data((const char*)client->nonce, client->nonce_size));
+	}
+	unsigned char* sep_nonce = NULL;
+	int sep_nonce_size = 0;
+	get_sep_nonce(client, &sep_nonce, &sep_nonce_size);
+
+	/* ApSepNonce */
+	if (sep_nonce) {
+		plist_dict_set_item(parameters, "ApSepNonce", plist_new_data((const char*)sep_nonce, sep_nonce_size));
+		free(sep_nonce);
+	}
+
+	/* ApProductionMode */
+	plist_dict_set_item(parameters, "ApProductionMode", plist_new_bool(1));
+
+	/* ApSecurityMode */
+	if (client->image4supported) {
+		plist_dict_set_item(parameters, "ApSecurityMode", plist_new_bool(1));
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(1));
+	} else {
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(0));
+	}
+
+	tss_parameters_add_from_manifest(parameters, build_identity);
+
+	/* create basic request */
+	/* Adds @BBTicket, @HostPlatformInfo, @VersionInfo, @UUID */
+	request = tss_request_new(NULL);
+	if (request == NULL) {
+		error("ERROR: Unable to create TSS request\n");
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add common tags from manifest */
+	/* Adds Ap,OSLongVersion, AppNonce, @ApImg4Ticket */
+	if (tss_request_add_ap_img4_tags(request, parameters) < 0) {
+		error("ERROR: Unable to add AP IMG4 tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add AP tags from manifest */
+	if (tss_request_add_common_tags(request, parameters, NULL) < 0) {
+		error("ERROR: Unable to add common tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add AP tags from manifest */
+	/* Fills digests & co */
+	if (tss_request_add_ap_recovery_tags(request, parameters, NULL) < 0) {
+		error("ERROR: Unable to add common tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* send request and grab response */
+	response = tss_request_send(request, client->tss_url);
+	if (response == NULL) {
+		info("ERROR: Unable to send TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+	// request_add_ap_tags
+
+	info("Received SHSH blobs\n");
+
+	plist_free(request);
+	plist_free(parameters);
+
+	*tss = response;
+
+	return 0;
+}
+
+int get_recovery_os_local_policy_tss_response(
+				struct idevicerestore_client_t* client,
+				plist_t build_identity,
+				plist_t* tss,
+				plist_t args)
+{
+	plist_t request = NULL;
+	plist_t response = NULL;
+	*tss = NULL;
+
+	/* populate parameters */
+	plist_t parameters = plist_new_dict();
+	plist_dict_set_item(parameters, "ApECID", plist_new_uint(client->ecid));
+	plist_dict_set_item(parameters, "Ap,LocalBoot", plist_new_bool(1));
+
+	plist_dict_set_item(parameters, "ApProductionMode", plist_new_bool(1));
+	if (client->image4supported) {
+		plist_dict_set_item(parameters, "ApSecurityMode", plist_new_bool(1));
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(1));
+	} else {
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(0));
+	}
+
+	tss_parameters_add_from_manifest(parameters, build_identity);
+
+	// Add Ap,LocalPolicy
+	uint8_t digest[SHA384_DIGEST_LENGTH];
+	SHA384(lpol_file, lpol_file_length, digest);
+	plist_t lpol = plist_new_dict();
+	plist_dict_set_item(lpol, "Digest", plist_new_data((char*)digest, SHA384_DIGEST_LENGTH));
+	plist_dict_set_item(lpol, "Trusted", plist_new_bool(1));
+	plist_dict_set_item(parameters, "Ap,LocalPolicy", lpol);
+
+	plist_t im4m_hash = plist_dict_get_item(args, "Ap,NextStageIM4MHash");
+	plist_dict_set_item(parameters, "Ap,NextStageIM4MHash", plist_copy(im4m_hash));
+
+	plist_t nonce_hash = plist_dict_get_item(args, "Ap,RecoveryOSPolicyNonceHash");
+	plist_dict_set_item(parameters, "Ap,RecoveryOSPolicyNonceHash", plist_copy(nonce_hash));
+
+	plist_t vol_uuid_node = plist_dict_get_item(args, "Ap,VolumeUUID");
+	char* vol_uuid_str = NULL;
+	plist_get_string_val(vol_uuid_node, &vol_uuid_str);
+	unsigned int vuuid[16];
+	unsigned char vol_uuid[16];
+	if (sscanf(vol_uuid_str, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", &vuuid[0], &vuuid[1], &vuuid[2], &vuuid[3], &vuuid[4], &vuuid[5], &vuuid[6], &vuuid[7], &vuuid[8], &vuuid[9], &vuuid[10], &vuuid[11], &vuuid[12], &vuuid[13], &vuuid[14], &vuuid[15]) != 16) {
+		error("ERROR: Failed to parse Ap,VolumeUUID (%s)\n", vol_uuid_str);
+		free(vol_uuid_str);
+		return -1;
+	}
+	free(vol_uuid_str);
+	int i;
+	for (i = 0; i < 16; i++) {
+		vol_uuid[i] = (unsigned char)vuuid[i];
+	}
+	plist_dict_set_item(parameters, "Ap,VolumeUUID", plist_new_data((char*)vol_uuid, 16));
+
+	/* create basic request */
+	request = tss_request_new(NULL);
+	if (request == NULL) {
+		error("ERROR: Unable to create TSS request\n");
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add common tags from manifest */
+	if (tss_request_add_local_policy_tags(request, parameters) < 0) {
+		error("ERROR: Unable to add common tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* send request and grab response */
+	response = tss_request_send(request, client->tss_url);
+	if (response == NULL) {
+		info("ERROR: Unable to send TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	info("Received SHSH blobs\n");
+
+	plist_free(request);
+	plist_free(parameters);
+
+	*tss = response;
+
+	return 0;
+}
+
+int get_local_policy_tss_response(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* tss)
+{
+	plist_t request = NULL;
+	plist_t response = NULL;
+	*tss = NULL;
+
+	/* populate parameters */
+	plist_t parameters = plist_new_dict();
+	plist_dict_set_item(parameters, "ApECID", plist_new_uint(client->ecid));
+	plist_dict_set_item(parameters, "Ap,LocalBoot", plist_new_bool(0));
+	if (client->nonce) {
+		plist_dict_set_item(parameters, "ApNonce", plist_new_data((const char*)client->nonce, client->nonce_size));
+	}
+	unsigned char* sep_nonce = NULL;
+	int sep_nonce_size = 0;
+	get_sep_nonce(client, &sep_nonce, &sep_nonce_size);
+
+	if (sep_nonce) {
+		plist_dict_set_item(parameters, "ApSepNonce", plist_new_data((const char*)sep_nonce, sep_nonce_size));
+		free(sep_nonce);
+	}
+
+	plist_dict_set_item(parameters, "ApProductionMode", plist_new_bool(1));
+	if (client->image4supported) {
+		plist_dict_set_item(parameters, "ApSecurityMode", plist_new_bool(1));
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(1));
+	} else {
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(0));
+	}
+
+	tss_parameters_add_from_manifest(parameters, build_identity);
+
+	// Add Ap,LocalPolicy
+	uint8_t digest[SHA384_DIGEST_LENGTH];
+	SHA384(lpol_file, lpol_file_length, digest);
+	plist_t lpol = plist_new_dict();
+	plist_dict_set_item(lpol, "Digest", plist_new_data((char*)digest, SHA384_DIGEST_LENGTH));
+	plist_dict_set_item(lpol, "Trusted", plist_new_bool(1));
+	plist_dict_set_item(parameters, "Ap,LocalPolicy", lpol);
+
+	// Add Ap,NextStageIM4MHash
+	// Get previous TSS ticket
+	uint8_t* ticket = NULL;
+	uint32_t ticket_length = 0;
+	tss_response_get_ap_img4_ticket(client->tss, &ticket, &ticket_length);
+	// Hash it and add it as Ap,NextStageIM4MHash
+	uint8_t hash[SHA384_DIGEST_LENGTH];
+	SHA384(ticket, ticket_length, hash);
+	plist_dict_set_item(parameters, "Ap,NextStageIM4MHash", plist_new_data((char*)hash, SHA384_DIGEST_LENGTH));
+
+	/* create basic request */
+	request = tss_request_new(NULL);
+	if (request == NULL) {
+		error("ERROR: Unable to create TSS request\n");
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add common tags from manifest */
+	if (tss_request_add_local_policy_tags(request, parameters) < 0) {
+		error("ERROR: Unable to add common tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* send request and grab response */
+	response = tss_request_send(request, client->tss_url);
+	if (response == NULL) {
+		info("ERROR: Unable to send TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	info("Received SHSH blobs\n");
+
+	plist_free(request);
+	plist_free(parameters);
+
+	*tss = response;
+
+	return 0;
+}
+
 void fixup_tss(plist_t tss)
 {
 	plist_t node;
@@ -2290,7 +2638,8 @@ void fixup_tss(plist_t tss)
 	}
 }
 
-int build_manifest_get_identity_count(plist_t build_manifest) {
+int build_manifest_get_identity_count(plist_t build_manifest)
+{
 	// fetch build identities array from BuildManifest
 	plist_t build_identities_array = plist_dict_get_item(build_manifest, "BuildIdentities");
 	if (!build_identities_array || plist_get_node_type(build_identities_array) != PLIST_ARRAY) {
@@ -2315,7 +2664,7 @@ int extract_component(const char* ipsw, const char* path, unsigned char** compon
 	else
 		component_name = (char*) path;
 
-	info("Extracting %s...\n", component_name);
+	info("Extracting %s (%s)...\n", component_name, path);
 	if (ipsw_extract_to_memory(ipsw, path, component_data, component_size) < 0) {
 		error("ERROR: Unable to extract %s from %s\n", component_name, ipsw);
 		return -1;
@@ -2324,7 +2673,8 @@ int extract_component(const char* ipsw, const char* path, unsigned char** compon
 	return 0;
 }
 
-int personalize_component(const char *component_name, const unsigned char* component_data, unsigned int component_size, plist_t tss_response, unsigned char** personalized_component, unsigned int* personalized_component_size) {
+int personalize_component(const char *component_name, const unsigned char* component_data, unsigned int component_size, plist_t tss_response, unsigned char** personalized_component, unsigned int* personalized_component_size)
+{
 	unsigned char* component_blob = NULL;
 	unsigned int component_blob_size = 0;
 	unsigned char* stitched_component = NULL;
@@ -2365,7 +2715,8 @@ int personalize_component(const char *component_name, const unsigned char* compo
 	return 0;
 }
 
-int build_manifest_check_compatibility(plist_t build_manifest, const char* product) {
+int build_manifest_check_compatibility(plist_t build_manifest, const char* product)
+{
 	int res = -1;
 	plist_t node = plist_dict_get_item(build_manifest, "SupportedProductTypes");
 	if (!node || (plist_get_node_type(node) != PLIST_ARRAY)) {
@@ -2391,7 +2742,8 @@ int build_manifest_check_compatibility(plist_t build_manifest, const char* produ
 	return res;
 }
 
-void build_manifest_get_version_information(plist_t build_manifest, struct idevicerestore_client_t* client) {
+void build_manifest_get_version_information(plist_t build_manifest, struct idevicerestore_client_t* client)
+{
 	plist_t node = NULL;
 	client->version = NULL;
 	client->build = NULL;
@@ -2413,7 +2765,8 @@ void build_manifest_get_version_information(plist_t build_manifest, struct idevi
 	client->build_major = strtoul(client->build, NULL, 10);
 }
 
-void build_identity_print_information(plist_t build_identity) {
+void build_identity_print_information(plist_t build_identity)
+{
 	char* value = NULL;
 	plist_t info_node = NULL;
 	plist_t node = NULL;
@@ -2487,7 +2840,8 @@ int build_identity_check_components_in_ipsw(plist_t build_identity, const char *
 	return res;
 }
 
-int build_identity_has_component(plist_t build_identity, const char* component) {
+int build_identity_has_component(plist_t build_identity, const char* component)
+{
 	plist_t manifest_node = plist_dict_get_item(build_identity, "Manifest");
 	if (!manifest_node || plist_get_node_type(manifest_node) != PLIST_DICT) {
 		return 0;
@@ -2501,7 +2855,8 @@ int build_identity_has_component(plist_t build_identity, const char* component) 
 	return 1;
 }
 
-int build_identity_get_component_path(plist_t build_identity, const char* component, char** path) {
+int build_identity_get_component_path(plist_t build_identity, const char* component, char** path)
+{
 	char* filename = NULL;
 
 	plist_t manifest_node = plist_dict_get_item(build_identity, "Manifest");
@@ -2541,7 +2896,8 @@ int build_identity_get_component_path(plist_t build_identity, const char* compon
 	return 0;
 }
 
-const char* get_component_name(const char* filename) {
+const char* get_component_name(const char* filename)
+{
 	if (!strncmp(filename, "LLB", 3)) {
 		return "LLB";
 	} else if (!strncmp(filename, "iBoot", 5)) {
